@@ -1,4 +1,7 @@
 import Fastify from "fastify";
+import cors from "@fastify/cors";
+import helmet from "@fastify/helmet";
+import rateLimit from "@fastify/rate-limit";
 import { env } from "./config/env.js";
 
 import authPlugin from "./plugins/auth.js";
@@ -33,8 +36,9 @@ export async function buildApp() {
     },
   });
 
-  await app.register(import("@fastify/cors"), { origin: true });
-  await app.register(import("@fastify/helmet"));
+  await app.register(cors, { origin: true });
+  await app.register(helmet);
+  await app.register(rateLimit, { global: false });
   await app.register(authPlugin);
   await app.register(errorHandlerPlugin);
 

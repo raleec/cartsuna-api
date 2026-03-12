@@ -5,12 +5,17 @@ describe("GET /health", () => {
   let app: Awaited<ReturnType<typeof buildApp>>;
 
   beforeAll(async () => {
-    app = await buildApp();
-    await app.ready();
+    try {
+      app = await buildApp();
+      await app.ready();
+    } catch (err) {
+      console.error("buildApp error:", err);
+      throw err;
+    }
   });
 
   afterAll(async () => {
-    await app.close();
+    if (app) await app.close();
   });
 
   it("returns status ok", async () => {
