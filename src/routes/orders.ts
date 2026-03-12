@@ -44,7 +44,8 @@ const ordersRoutes: FastifyPluginAsync = async (fastify) => {
   fastify.post("/", async (request, reply) => {
     const body = createSchema.parse(request.body);
 
-    // Use a transaction with SELECT FOR UPDATE to prevent race condition on quota
+    let newOrder: typeof tOrder.$inferSelect;
+
     if (body.availabilityId) {
       const availabilityId = body.availabilityId;
       const itemCount = body.itemCount;
@@ -59,15 +60,16 @@ const ordersRoutes: FastifyPluginAsync = async (fastify) => {
           sql`SELECT availability_id, quota, booked FROM t_item_availability WHERE availability_id = ${availabilityId} FOR UPDATE`
         );
         const avail = rows.rows[0];
-        if (!avail) return { error: "not_found" };
+        if (!avail) return { error: "not_found" as const, order: null };
         if (avail.quota !== null && avail.booked + itemCount > avail.quota) {
-          return { error: "quota_exceeded" };
+          return { error: "quota_exceeded" as const, order: null };
         }
         await tx
           .update(tItemAvailability)
           .set({ booked: sql`${tItemAvailability.booked} + ${itemCount}` })
           .where(eq(tItemAvailability.availabilityId, availabilityId));
-        return { error: null };
+        const [inserted] = await tx.insert(tOrder).values(body).returning();
+        return { error: null, order: inserted };
       });
 
       if (result.error === "not_found") {
@@ -78,31 +80,113 @@ const ordersRoutes: FastifyPluginAsync = async (fastify) => {
           .status(409)
           .send({ error: "Conflict", message: "Availability quota exceeded" });
       }
+      newOrder = result.order!;
+    } else {
+      const [inserted] = await db.insert(tOrder).values(body).returning();
+      newOrder = inserted;
     }
 
-    const [row] = await db.insert(tOrder).values(body).returning();
+    try {
+      await publishEvent("order.created", { orderId: newOrder.orderId, itemId: newOrder.itemId });
+    } catch (err) {
+      request.log.error({ err }, "Failed to publish order.created event");
+    }
 
-    await publishEvent("order.created", { orderId: row.orderId, itemId: row.itemId });
-
-    return reply.status(201).send(row);
+    return reply.status(201).send(newOrder);
   });
 
   fastify.put("/:id", async (request, reply) => {
     const { id } = z.object({ id: z.string().uuid() }).parse(request.params);
     const body = updateSchema.parse(request.body);
-    const [row] = await db
-      .update(tOrder)
-      .set(body)
-      .where(eq(tOrder.orderId, id))
-      .returning();
+
+    // If itemCount is being updated, adjust the availability booked count atomically
+    if (body.itemCount !== undefined) {
+      const result = await db.transaction(async (tx) => {
+        const [existing] = await tx.select().from(tOrder).where(eq(tOrder.orderId, id)).limit(1);
+        if (!existing) return { error: "not_found" as const, order: null };
+
+        if (existing.availabilityId && body.itemCount !== undefined) {
+          const delta = body.itemCount - existing.itemCount;
+          if (delta !== 0) {
+            const rows = await tx.execute<{ quota: number | null; booked: number }>(
+              sql`SELECT quota, booked FROM t_item_availability WHERE availability_id = ${existing.availabilityId} FOR UPDATE`
+            );
+            const avail = rows.rows[0];
+            if (avail) {
+              if (delta > 0 && avail.quota !== null && avail.booked + delta > avail.quota) {
+                return { error: "quota_exceeded" as const, order: null };
+              }
+              await tx
+                .update(tItemAvailability)
+                .set({ booked: sql`${tItemAvailability.booked} + ${delta}` })
+                .where(eq(tItemAvailability.availabilityId, existing.availabilityId));
+            }
+          }
+        }
+
+        const [updated] = await tx.update(tOrder).set(body).where(eq(tOrder.orderId, id)).returning();
+        return { error: null, order: updated };
+      });
+
+      if (result.error === "not_found") {
+        return reply.status(404).send({ error: "NotFound", message: "Order not found" });
+      }
+      if (result.error === "quota_exceeded") {
+        return reply.status(409).send({ error: "Conflict", message: "Availability quota exceeded" });
+      }
+
+      try {
+        await publishEvent("order.updated", { orderId: id, state: result.order?.state });
+      } catch (err) {
+        request.log.error({ err }, "Failed to publish order.updated event");
+      }
+
+      return result.order;
+    }
+
+    const [row] = await db.update(tOrder).set(body).where(eq(tOrder.orderId, id)).returning();
     if (!row) return reply.status(404).send({ error: "NotFound", message: "Order not found" });
+
+    try {
+      await publishEvent("order.updated", { orderId: id, state: row.state });
+    } catch (err) {
+      request.log.error({ err }, "Failed to publish order.updated event");
+    }
+
     return row;
   });
 
   fastify.delete("/:id", async (request, reply) => {
     const { id } = z.object({ id: z.string().uuid() }).parse(request.params);
-    const [row] = await db.delete(tOrder).where(eq(tOrder.orderId, id)).returning();
-    if (!row) return reply.status(404).send({ error: "NotFound", message: "Order not found" });
+
+    await db.transaction(async (tx) => {
+      const [row] = await tx.select().from(tOrder).where(eq(tOrder.orderId, id)).limit(1);
+      if (!row) {
+        await reply.status(404).send({ error: "NotFound", message: "Order not found" });
+        return;
+      }
+
+      // Decrement booked count on availability slot if present
+      if (row.availabilityId) {
+        await tx
+          .update(tItemAvailability)
+          .set({ booked: sql`GREATEST(0, ${tItemAvailability.booked} - ${row.itemCount})` })
+          .where(eq(tItemAvailability.availabilityId, row.availabilityId));
+      }
+
+      await tx.delete(tOrder).where(eq(tOrder.orderId, id));
+
+      try {
+        await publishEvent("order.cancelled", {
+          orderId: id,
+          availabilityId: row.availabilityId,
+          itemCount: row.itemCount,
+        });
+      } catch (err) {
+        request.log.error({ err }, "Failed to publish order.cancelled event");
+      }
+    });
+
     return reply.status(204).send();
   });
 };

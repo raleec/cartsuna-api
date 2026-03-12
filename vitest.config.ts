@@ -9,6 +9,13 @@ export default defineConfig({
     globals: true,
     environment: "node",
     setupFiles: [],
+    env: {
+      NODE_ENV: "test",
+      JWT_SECRET: "test-jwt-secret-for-vitest-do-not-use-in-prod",
+      REFRESH_TOKEN_SECRET: "test-refresh-secret-for-vitest-do-not-use-in-prod",
+      DATABASE_URL: "postgresql://cartsuna:cartsuna@localhost:5432/cartsuna_test",
+      REDIS_URL: "redis://localhost:6379",
+    },
   },
   resolve: {
     alias: {

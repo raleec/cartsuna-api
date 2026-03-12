@@ -28,8 +28,10 @@ const authPlugin: FastifyPluginAsync = async (fastify) => {
               .send({ error: "Unauthorized", message: "Token has been revoked" });
           }
         }
-      } catch (err) {
-        reply.send(err);
+      } catch {
+        return reply
+          .status(401)
+          .send({ error: "Unauthorized", message: "Invalid or expired token" });
       }
     }
   );

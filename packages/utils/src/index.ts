@@ -40,12 +40,19 @@ export function isWithinRruleWindow(
   rruleStr: string,
   start: Date,
   end: Date,
-  _timezone: string
+  timezone: string
 ): boolean {
   try {
+    // RRule library works in UTC internally; we pass tzid for DST-aware expansion
     const rule = RRule.fromString(rruleStr);
-    const occurrences = rule.between(start, end, true);
-    return occurrences.some((occ) => occ.getTime() === ts.getTime());
+    // If the rrule string doesn't already include TZID, set it via options
+    const options = rule.options;
+    if (!options.tzid && timezone) {
+      options.tzid = timezone;
+    }
+    const tzRule = new RRule(options);
+    const occurrences = tzRule.between(start, end, true);
+    return occurrences.some((occ) => Math.abs(occ.getTime() - ts.getTime()) < 1000);
   } catch {
     return false;
   }

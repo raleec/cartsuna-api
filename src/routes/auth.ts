@@ -10,12 +10,6 @@ import { env } from "../config/env.js";
 
 const BCRYPT_ROUNDS = 12;
 
-// Rate limit config for auth endpoints to prevent brute force
-const authRateLimit = {
-  max: 10,
-  timeWindow: "1 minute",
-};
-
 const registerSchema = z.object({
   email: z.string().email(),
   password: z.string().min(8),
@@ -29,7 +23,14 @@ const loginSchema = z.object({
 });
 
 const authRoutes: FastifyPluginAsync = async (fastify) => {
-  fastify.post("/register", { config: { rateLimit: authRateLimit } }, async (request, reply) => {
+  // Apply rate limiting to all auth routes to prevent brute-force attacks
+  await fastify.register(import("@fastify/rate-limit"), {
+    max: 10,
+    timeWindow: "1 minute",
+    keyGenerator: (request) => request.ip,
+  });
+
+  fastify.post("/register", async (request, reply) => {
     const body = registerSchema.parse(request.body);
     const passphrase = await bcrypt.hash(body.password, BCRYPT_ROUNDS);
     const [user] = await db
@@ -57,7 +58,7 @@ const authRoutes: FastifyPluginAsync = async (fastify) => {
     });
   });
 
-  fastify.post("/login", { config: { rateLimit: authRateLimit } }, async (request, reply) => {
+  fastify.post("/login", async (request, reply) => {
     const body = loginSchema.parse(request.body);
     const [user] = await db.select().from(tUser).where(eq(tUser.email, body.email)).limit(1);
     if (!user)
@@ -81,7 +82,7 @@ const authRoutes: FastifyPluginAsync = async (fastify) => {
     };
   });
 
-  fastify.post("/refresh", { config: { rateLimit: authRateLimit } }, async (request, reply) => {
+  fastify.post("/refresh", async (request, reply) => {
     const body = z.object({ refreshToken: z.string() }).parse(request.body);
     try {
       const payload = jwt.verify(body.refreshToken, env.REFRESH_TOKEN_SECRET) as {

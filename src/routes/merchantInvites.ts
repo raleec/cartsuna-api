@@ -1,5 +1,5 @@
 import type { FastifyPluginAsync } from "fastify";
-import { and, eq } from "drizzle-orm";
+import { and, eq, sql } from "drizzle-orm";
 import { z } from "zod";
 import bcrypt from "bcrypt";
 import { db } from "../db/connection.js";
@@ -105,10 +105,31 @@ const merchantInvitesRoutes: FastifyPluginAsync = async (fastify) => {
       if (invite.maxUses !== null && invite.useCount >= invite.maxUses) continue;
       const valid = await bcrypt.compare(code, invite.codeHash);
       if (valid) {
-        await db
+        // Atomically increment use_count with a WHERE guard to prevent race conditions
+        const [updated] = await db
           .update(tMerchantInvite)
-          .set({ useCount: invite.useCount + 1 })
-          .where(eq(tMerchantInvite.inviteId, invite.inviteId));
+          .set({ useCount: sql`${tMerchantInvite.useCount} + 1` })
+          .where(
+            and(
+              eq(tMerchantInvite.inviteId, invite.inviteId),
+              sql`(${tMerchantInvite.maxUses} IS NULL OR ${tMerchantInvite.useCount} < ${tMerchantInvite.maxUses})`
+            )
+          )
+          .returning();
+
+        if (!updated) {
+          // Another request beat us to it and exhausted quota
+          continue;
+        }
+
+        // Auto-deactivate if max_uses reached
+        if (updated.maxUses !== null && updated.useCount >= updated.maxUses) {
+          await db
+            .update(tMerchantInvite)
+            .set({ isActive: false })
+            .where(eq(tMerchantInvite.inviteId, invite.inviteId));
+        }
+
         return { granted: true, inviteId: invite.inviteId };
       }
     }
