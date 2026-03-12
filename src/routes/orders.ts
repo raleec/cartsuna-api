@@ -44,25 +44,40 @@ const ordersRoutes: FastifyPluginAsync = async (fastify) => {
   fastify.post("/", async (request, reply) => {
     const body = createSchema.parse(request.body);
 
-    // Atomically increment booked count on availability if specified
+    // Use a transaction with SELECT FOR UPDATE to prevent race condition on quota
     if (body.availabilityId) {
-      const [avail] = await db
-        .select()
-        .from(tItemAvailability)
-        .where(eq(tItemAvailability.availabilityId, body.availabilityId))
-        .limit(1);
-      if (!avail) {
+      const availabilityId = body.availabilityId;
+      const itemCount = body.itemCount;
+
+      const result = await db.transaction(async (tx) => {
+        // Lock the row for update to ensure atomicity
+        const rows = await tx.execute<{
+          availability_id: string;
+          quota: number | null;
+          booked: number;
+        }>(
+          sql`SELECT availability_id, quota, booked FROM t_item_availability WHERE availability_id = ${availabilityId} FOR UPDATE`
+        );
+        const avail = rows.rows[0];
+        if (!avail) return { error: "not_found" };
+        if (avail.quota !== null && avail.booked + itemCount > avail.quota) {
+          return { error: "quota_exceeded" };
+        }
+        await tx
+          .update(tItemAvailability)
+          .set({ booked: sql`${tItemAvailability.booked} + ${itemCount}` })
+          .where(eq(tItemAvailability.availabilityId, availabilityId));
+        return { error: null };
+      });
+
+      if (result.error === "not_found") {
         return reply.status(404).send({ error: "NotFound", message: "Availability not found" });
       }
-      if (avail.quota !== null && avail.booked + body.itemCount > avail.quota) {
+      if (result.error === "quota_exceeded") {
         return reply
           .status(409)
           .send({ error: "Conflict", message: "Availability quota exceeded" });
       }
-      await db
-        .update(tItemAvailability)
-        .set({ booked: sql`${tItemAvailability.booked} + ${body.itemCount}` })
-        .where(eq(tItemAvailability.availabilityId, body.availabilityId));
     }
 
     const [row] = await db.insert(tOrder).values(body).returning();

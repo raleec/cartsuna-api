@@ -5,6 +5,8 @@ import bcrypt from "bcrypt";
 import { db } from "../db/connection.js";
 import { tMerchantInvite } from "../db/schema/index.js";
 
+const BCRYPT_ROUNDS = 12;
+
 const createInviteSchema = z.object({
   code: z.string().min(6),
   label: z.string().optional(),
@@ -35,7 +37,7 @@ const merchantInvitesRoutes: FastifyPluginAsync = async (fastify) => {
   fastify.post("/:id/invites", async (request, reply) => {
     const { id } = z.object({ id: z.string().uuid() }).parse(request.params);
     const body = createInviteSchema.parse(request.body);
-    const codeHash = await bcrypt.hash(body.code, 10);
+    const codeHash = await bcrypt.hash(body.code, BCRYPT_ROUNDS);
     const [row] = await db
       .insert(tMerchantInvite)
       .values({
